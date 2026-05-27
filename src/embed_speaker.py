@@ -35,7 +35,7 @@ import torch
 import librosa
 from qwen_tts import Qwen3TTSModel
 from qwen_tts.core.models.modeling_qwen3_tts import mel_spectrogram
-from utils import get_model_path
+from utils import get_model_path, resolve_embed_base_model
 
 
 def get_runtime_device():
@@ -72,23 +72,25 @@ def extract_embedding(se, audio_path, device):
     return emb[0].cpu()
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--base_model", default="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-                        help="Base model HF ID for speaker_encoder extraction")
-    parser.add_argument("--model_source", default="ModelScope", choices=["HuggingFace", "ModelScope"],
-                        help="Model download source, consistent with the rest of the project")
-    parser.add_argument("--mode", default="ref", choices=["ref", "avg_all"],
-                        help="ref=use ref_audio from JSONL, avg_all=average all samples per speaker")
-    parser.add_argument("--speaker", default=None, help="Process single speaker")
-    parser.add_argument("--ref", default=None, help="Custom ref audio(s), comma-separated")
-    parser.add_argument("--output", default=None, help="Custom output path")
-    args = parser.parse_args()
+def parse_speaker_names(speaker_arg):
+    if not speaker_arg:
+        return None
+    return [item.strip() for item in str(speaker_arg).split(",") if item.strip()]
 
+
+def run_embedding_job(
+    model_name="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+    model_source="ModelScope",
+    mode="ref",
+    speaker=None,
+    ref=None,
+    output=None,
+):
     device = get_runtime_device()
-    use_hf = args.model_source == "HuggingFace"
-    resolved_base_model = get_model_path(args.base_model, use_hf=use_hf)
-    print(f"Loading speaker_encoder from {args.base_model}")
+    use_hf = model_source == "HuggingFace"
+    base_model = resolve_embed_base_model(model_name)
+    resolved_base_model = get_model_path(base_model, use_hf=use_hf)
+    print(f"Loading speaker_encoder from {base_model}")
     print(f"Resolved model path: {resolved_base_model}")
     se = load_speaker_encoder(resolved_base_model, device=device)
 
@@ -97,31 +99,31 @@ def main():
         print("final-dataset/ not found. Run the data pipeline first.")
         sys.exit(1)
 
-    speakers = [args.speaker] if args.speaker else [
+    explicit_speakers = parse_speaker_names(speaker)
+    speakers = explicit_speakers if explicit_speakers else [
         d for d in os.listdir(dataset_path)
         if os.path.isdir(os.path.join(dataset_path, d))
     ]
 
     for spk in speakers:
-        # Embeddings go alongside speaker data in final-dataset/
         spk_dir = os.path.join(dataset_path, spk)
         jsonl = os.path.join(spk_dir, "tts_train.jsonl")
         audio_dir = os.path.join(spk_dir, "audio_24k")
-        out_path = args.output or os.path.join(spk_dir, "speaker_emb.safetensors")
+        out_path = output or os.path.join(spk_dir, "speaker_emb.safetensors")
 
         embeddings = []
 
-        if args.ref:
-            for ref_file in args.ref.split(","):
+        if ref:
+            for ref_file in ref.split(","):
                 ref_file = ref_file.strip()
                 if not os.path.isabs(ref_file):
                     ref_file = os.path.join(audio_dir, ref_file)
                 if os.path.exists(ref_file):
                     print(f"  {spk}: {os.path.basename(ref_file)}")
                     embeddings.append(extract_embedding(se, ref_file, device))
-        elif args.mode == "avg_all":
+        elif mode == "avg_all":
             if os.path.exists(jsonl):
-                with open(jsonl) as f:
+                with open(jsonl, encoding="utf-8") as f:
                     entries = [json.loads(line) for line in f]
                 for entry in entries:
                     audio_path = entry.get("audio")
@@ -132,15 +134,14 @@ def main():
                 print(f"  {spk}: no JSONL, skipping")
                 continue
         else:
-            # Default: use ref_audio from JSONL (set by Step 2 pipeline)
             if os.path.exists(jsonl):
-                with open(jsonl) as f:
+                with open(jsonl, encoding="utf-8") as f:
                     entries = [json.loads(line) for line in f]
                 if entries:
-                    ref = entries[0].get("ref_audio")
-                    if ref and os.path.exists(ref):
-                        print(f"  {spk}: {os.path.basename(ref)}")
-                        embeddings.append(extract_embedding(se, ref, device))
+                    ref_audio = entries[0].get("ref_audio")
+                    if ref_audio and os.path.exists(ref_audio):
+                        print(f"  {spk}: {os.path.basename(ref_audio)}")
+                        embeddings.append(extract_embedding(se, ref_audio, device))
                     else:
                         print(f"  {spk}: ref_audio not found in JSONL, skipping")
                         continue
@@ -152,10 +153,10 @@ def main():
                 continue
 
         if embeddings:
-            avg_emb = torch.stack(embeddings).mean(dim=0).squeeze(0)  # [D]
+            avg_emb = torch.stack(embeddings).mean(dim=0).squeeze(0)
             from safetensors.torch import save_file
             save_file({"emb": avg_emb}, out_path)
-            print(f"  → saved {out_path} (norm={avg_emb.norm():.2f})")
+            print(f"  -> saved {out_path} (norm={avg_emb.norm():.2f})")
         else:
             print(f"  {spk}: no embeddings extracted")
 
@@ -164,6 +165,28 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     print("\nDone.")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--base_model", "--init_model", dest="base_model", default="Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+                        help="Training model ID; CustomVoice models will automatically reuse the matching Base speaker encoder")
+    parser.add_argument("--model_source", default="ModelScope", choices=["HuggingFace", "ModelScope"],
+                        help="Model download source, consistent with the rest of the project")
+    parser.add_argument("--mode", default="ref", choices=["ref", "avg_all"],
+                        help="ref=use ref_audio from JSONL, avg_all=average all samples per speaker")
+    parser.add_argument("--speaker", default=None, help="Process single speaker")
+    parser.add_argument("--ref", default=None, help="Custom ref audio(s), comma-separated")
+    parser.add_argument("--output", default=None, help="Custom output path")
+    args = parser.parse_args()
+    run_embedding_job(
+        model_name=args.base_model,
+        model_source=args.model_source,
+        mode=args.mode,
+        speaker=args.speaker,
+        ref=args.ref,
+        output=args.output,
+    )
 
 
 if __name__ == "__main__":

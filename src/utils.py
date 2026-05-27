@@ -2,6 +2,13 @@ import os
 import re
 import shutil
 
+DEFAULT_TTS_TRAIN_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+SUPPORTED_TTS_TRAIN_MODELS = [
+    "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+    "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+    "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+]
+
 
 def get_project_root():
     '''Detect the project root directory.
@@ -129,6 +136,37 @@ def get_model_path(model_id, use_hf=False):
     except Exception as e:
         print(f'Warning: Download failed, falling back to id: {e}')
         return model_id
+
+
+def resolve_embed_base_model(model_id):
+    model_id = model_id.strip() if isinstance(model_id, str) else ""
+    if not model_id:
+        return DEFAULT_TTS_TRAIN_MODEL
+    if model_id.endswith("-Base"):
+        return model_id
+    if "0.6B" in model_id:
+        return "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+    if "1.7B" in model_id:
+        return "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+    return DEFAULT_TTS_TRAIN_MODEL
+
+
+def is_custom_voice_model(model_id):
+    return isinstance(model_id, str) and model_id.endswith("-CustomVoice")
+
+
+def missing_speaker_embeddings(speaker_names):
+    missing = []
+    if not speaker_names:
+        return missing
+    for speaker_name in speaker_names:
+        speaker_name = str(speaker_name).strip()
+        if not speaker_name:
+            continue
+        emb_path = resolve_path(os.path.join("final-dataset", speaker_name, "speaker_emb.safetensors"))
+        if not os.path.exists(emb_path):
+            missing.append(speaker_name)
+    return missing
 
 
 def speaker_key(value):

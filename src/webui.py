@@ -13,7 +13,18 @@ import time
 import torch
 import gc
 import sys
-from utils import get_model_path, get_model_local_dir, get_project_root, resolve_path, resolve_speaker_choice
+from utils import (
+    DEFAULT_TTS_TRAIN_MODEL,
+    SUPPORTED_TTS_TRAIN_MODELS,
+    get_model_path,
+    get_model_local_dir,
+    get_project_root,
+    is_custom_voice_model,
+    missing_speaker_embeddings,
+    resolve_embed_base_model,
+    resolve_path,
+    resolve_speaker_choice,
+)
 from webui_training import (
     get_checkpoints,
     normalize_speaker_name,
@@ -260,20 +271,6 @@ def run_step_3(speaker_name, experiment_name, gpu_id, model_source, progress=gr.
     stream = stream_isolated(internal_run_prepare, device, resolved_tokenizer, input_jsonl, output_jsonl)
     yield from stream_worker_updates(stream, progress)
 
-
-def resolve_embed_base_model(model_name):
-    model_name = model_name.strip() if isinstance(model_name, str) else ""
-    if not model_name:
-        return "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
-    if model_name.endswith("-Base"):
-        return model_name
-    if "0.6B" in model_name:
-        return "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
-    if "1.7B" in model_name:
-        return "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
-    return "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
-
-
 def run_embed_speakers(speaker_name, gpu_id, model_name, model_source, progress=gr.Progress()):
     """Pre-compute speaker embeddings from reference audio."""
     if isinstance(speaker_name, list):
@@ -415,6 +412,16 @@ def start_training(
     train_jsonl = resolve_path(os.path.join("logs", experiment_name, "tts_train_with_codes.jsonl"))
     if not os.path.exists(train_jsonl):
         yield f"Error: JSONL file {train_jsonl} not found. Please run tokenization (Step 1 -> 2 -> 3) first.", ""
+        return
+    speaker_names = [s.strip() for s in speaker_name_str.split(",") if s.strip()]
+    missing_embeddings = missing_speaker_embeddings(speaker_names)
+    if missing_embeddings:
+        guidance = (
+            "Please run Step 3 'Embed Speakers' first."
+            if is_custom_voice_model(init_model)
+            else "Please run 'Embed Speakers' before starting training."
+        )
+        yield f"Error: Missing speaker embeddings for {', '.join(missing_embeddings)}. {guidance}", ""
         return
     output_dir = resolve_path(os.path.join("output", experiment_name))
     os.makedirs(output_dir, exist_ok=True)
@@ -608,8 +615,9 @@ def refresh_checkpoints():
 def refresh_datasets():
     return gr.update(choices=get_datasets())
 presets = {
-    "0.6B Model": { "init_model": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "lr": 1e-7, "epochs": 2, "batch_size": 2, "grad_acc": 4 },
-    "1.7B Model": { "init_model": "Qwen/Qwen3-TTS-12Hz-1.7B-Base", "lr": 2e-6, "epochs": 3, "batch_size": 2, "grad_acc": 1 },
+    "0.6B Base": { "init_model": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "lr": 1e-7, "epochs": 2, "batch_size": 2, "grad_acc": 4 },
+    "1.7B Base": { "init_model": "Qwen/Qwen3-TTS-12Hz-1.7B-Base", "lr": 2e-6, "epochs": 3, "batch_size": 2, "grad_acc": 1 },
+    "0.6B CustomVoice": { "init_model": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice", "lr": 1e-7, "epochs": 2, "batch_size": 2, "grad_acc": 4 },
     "Latest Config": {}
 }
 
@@ -621,7 +629,7 @@ def apply_preset(preset_name, experiment_name):
                 data = json.load(f)
             return data.get("init_model"), data.get("lr"), data.get("epochs"), data.get("batch_size"), data.get("grad_acc")
             
-    p = presets.get(preset_name, presets["0.6B Model"])
+    p = presets.get(preset_name, presets["0.6B Base"])
     return p["init_model"], p["lr"], p["epochs"], p["batch_size"], p["grad_acc"]
 
 def get_experiments():
@@ -836,7 +844,7 @@ with gr.Blocks(title="Qwen3-TTS Easy Finetuning", css=css) as app:
                 
                 with gr.Row():
                     with gr.Column():    
-                        init_model = gr.Dropdown(["Qwen/Qwen3-TTS-12Hz-0.6B-Base", "Qwen/Qwen3-TTS-12Hz-1.7B-Base"], label="Initial Model (Base)", value="Qwen/Qwen3-TTS-12Hz-0.6B-Base", allow_custom_value=True, info="Starting weights")
+                        init_model = gr.Dropdown(SUPPORTED_TTS_TRAIN_MODELS, label="Initial Model", value=DEFAULT_TTS_TRAIN_MODEL, allow_custom_value=True, info="Base or CustomVoice starting weights")
                         model_source = gr.Radio(["HuggingFace", "ModelScope"], label="Source", value="HuggingFace")
                     with gr.Column():
                         download_btn = gr.Button("⬇️ Check / Download Model", variant="secondary")
@@ -848,6 +856,7 @@ with gr.Blocks(title="Qwen3-TTS Easy Finetuning", css=css) as app:
             with gr.Column(elem_classes="gr-group"):
                 gr.Markdown("### Step 3: Data Tokenization")
                 gr.Markdown("Converts transcribed audio text entries to Audio Codes using Tokenizer. Required before training.")
+                gr.Markdown("For `CustomVoice`, run `Embed Speakers` after ASR and before training so each dataset has a `speaker_emb.safetensors` file.")
                 with gr.Row():
                     gpu_prep = gr.Dropdown(
                         gpus_list, 
@@ -866,7 +875,7 @@ with gr.Blocks(title="Qwen3-TTS Easy Finetuning", css=css) as app:
             with gr.Column(elem_classes="gr-group"):
                 gr.Markdown("### Step 4: Final Training")
                 with gr.Row():
-                    preset_dropdown = gr.Dropdown(list(presets.keys()), label="Training Preset", value="0.6B Model", info="Optimized parameter sets")
+                    preset_dropdown = gr.Dropdown(list(presets.keys()), label="Training Preset", value="0.6B Base", info="Optimized parameter sets")
                     gpu_train = gr.Dropdown(gpus_list, label="GPU Device for Training", value=default_gpu, info="Target GPU for SFT")
                     
                 with gr.Accordion("Advanced Training Options", open=False):
@@ -987,8 +996,11 @@ with gr.Blocks(title="Qwen3-TTS Easy Finetuning", css=css) as app:
     preset_dropdown.change(fn=apply_preset, inputs=[preset_dropdown, experiment_dropdown], outputs=[init_model, t_lr, t_epochs, t_batch, t_grad])
     # Also auto change preset when init model changes if it matches
     def auto_preset(model_val):
-        if "1.7B" in model_val: return "1.7B Model"
-        return "0.6B Model"
+        if model_val == "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice":
+            return "0.6B CustomVoice"
+        if "1.7B" in model_val:
+            return "1.7B Base"
+        return "0.6B Base"
     init_model.change(fn=auto_preset, inputs=[init_model], outputs=[preset_dropdown])
     
     # Training

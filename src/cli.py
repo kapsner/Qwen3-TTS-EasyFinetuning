@@ -16,7 +16,17 @@ import sys
 import json
 import time
 import argparse
-from utils import get_model_path, get_project_root, resolve_path, resolve_speaker_choice
+from utils import (
+    DEFAULT_TTS_TRAIN_MODEL,
+    SUPPORTED_TTS_TRAIN_MODELS,
+    get_model_path,
+    get_project_root,
+    is_custom_voice_model,
+    missing_speaker_embeddings,
+    resolve_embed_base_model,
+    resolve_path,
+    resolve_speaker_choice,
+)
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -167,6 +177,33 @@ def cmd_tokenize(args):
     consume_generator(run_prepare(device, resolved_tokenizer, input_jsonl, output_codes_jsonl))
 
 
+def cmd_embed(args):
+    """Pre-compute speaker embeddings for CustomVoice/Base training."""
+    print_header("🎤 Speaker Embedding Prep")
+    speaker_names = [s.strip() for s in args.speaker_name.split(',') if s.strip()]
+    if not speaker_names:
+        print("  ❌ No speaker names provided.")
+        sys.exit(1)
+
+    resolved_base_model = resolve_embed_base_model(args.init_model)
+    print(f"  Speakers     : {', '.join(speaker_names)}")
+    print(f"  Init Model   : {args.init_model}")
+    print(f"  Base Encoder : {resolved_base_model}")
+    print(f"  Model Source : {args.model_source}")
+    print(f"  Mode         : {args.mode}")
+
+    from embed_speaker import run_embedding_job
+
+    run_embedding_job(
+        model_name=args.init_model,
+        model_source=args.model_source,
+        mode=args.mode,
+        speaker=",".join(speaker_names),
+        ref=args.ref,
+        output=args.output,
+    )
+
+
 def cmd_train(args):
     """Run fine-tuning training (supports multi-speaker)."""
     import subprocess
@@ -181,7 +218,7 @@ def cmd_train(args):
         print(f"  Speakers     : {', '.join(speaker_names)} (multi-speaker)")
     else:
         print(f"  Speaker      : {args.speaker_name}")
-    print(f"  Base Model   : {args.init_model}")
+    print(f"  Init Model   : {args.init_model}")
     print(f"  GPU Device   : {args.gpu}")
     print(f"  Batch Size   : {args.batch_size}")
     print(f"  Learning Rate: {args.lr}")
@@ -196,6 +233,19 @@ def cmd_train(args):
     if not os.path.exists(train_jsonl):
         print(f"\n  ❌ Training data not found: {train_jsonl}")
         print("  Please run `python cli.py prepare` or `python cli.py tokenize` first.")
+        sys.exit(1)
+
+    missing_embeddings = missing_speaker_embeddings(speaker_names)
+    if missing_embeddings:
+        print(f"\n  ❌ Missing speaker embeddings for: {', '.join(missing_embeddings)}")
+        print("  This training flow expects pre-computed `speaker_emb.safetensors` files.")
+        print(
+            "  Please run `python cli.py embed --speaker_name "
+            + ",".join(missing_embeddings)
+            + f" --init_model {args.init_model} --model_source {args.model_source}` first."
+        )
+        if is_custom_voice_model(args.init_model):
+            print("  Tip: CustomVoice models reuse the matching Base speaker encoder during embedding.")
         sys.exit(1)
 
     output_dir = resolve_path(os.path.join("output", args.experiment_name))
@@ -375,12 +425,14 @@ Examples:
   # Single speaker
   python cli.py prepare --input_dir /workspace/raw-dataset --speaker_name my_speaker --experiment_name exp1
   python cli.py train   --experiment_name exp1 --speaker_name my_speaker
+  python cli.py embed   --speaker_name my_speaker --init_model Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
 
   # Multi-speaker
   python cli.py split     --input_dir /data/speaker_a --speaker_name speaker_a
   python cli.py asr       --speaker_name speaker_a
   python cli.py split     --input_dir /data/speaker_b --speaker_name speaker_b
   python cli.py asr       --speaker_name speaker_b
+  python cli.py embed     --speaker_name speaker_a,speaker_b --init_model Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
   python cli.py tokenize  --speaker_name speaker_a,speaker_b --experiment_name multi_exp
   python cli.py train     --experiment_name multi_exp --speaker_name speaker_a,speaker_b
 
@@ -425,11 +477,20 @@ Examples:
     p_tokenize.add_argument("--model_source", type=str, choices=["HuggingFace", "ModelScope"], default="HuggingFace")
     p_tokenize.add_argument("--gpu", type=str, default="cuda:0")
 
+    # ── embed ──
+    p_embed = subparsers.add_parser("embed", help="Generate speaker_emb.safetensors for Base/CustomVoice training")
+    p_embed.add_argument("--speaker_name", type=str, required=True, help="Speaker name(s), comma-separated for multi-speaker")
+    p_embed.add_argument("--init_model", type=str, default="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice", help="Training model ID; CustomVoice automatically uses the matching Base encoder")
+    p_embed.add_argument("--model_source", type=str, choices=["HuggingFace", "ModelScope"], default="HuggingFace", help="Model download source")
+    p_embed.add_argument("--mode", type=str, default="ref", choices=["ref", "avg_all"], help="Embedding strategy")
+    p_embed.add_argument("--ref", type=str, default=None, help="Custom reference audio(s), comma-separated")
+    p_embed.add_argument("--output", type=str, default=None, help="Custom output path for single-speaker runs")
+
     # ── train ──
     p_train = subparsers.add_parser("train", help="Run fine-tuning training (supports multi-speaker)")
     p_train.add_argument("--experiment_name", type=str, required=True, help="Name for this experiment")
     p_train.add_argument("--speaker_name", type=str, required=True, help="Speaker name(s), comma-separated for multi-speaker")
-    p_train.add_argument("--init_model", type=str, default="Qwen/Qwen3-TTS-12Hz-0.6B-Base", help="Base model ID")
+    p_train.add_argument("--init_model", type=str, default=DEFAULT_TTS_TRAIN_MODEL, help=f"Initial model ID (common options: {', '.join(SUPPORTED_TTS_TRAIN_MODELS)})")
     p_train.add_argument("--model_source", type=str, choices=["HuggingFace", "ModelScope"], default="HuggingFace", help="Model download source")
     p_train.add_argument("--batch_size", type=int, default=2, help="Training batch size")
     p_train.add_argument("--lr", type=float, default=1e-7, help="Learning rate")
@@ -470,6 +531,8 @@ Examples:
         cmd_asr(args)
     elif args.command == "tokenize":
         cmd_tokenize(args)
+    elif args.command == "embed":
+        cmd_embed(args)
     elif args.command == "train":
         cmd_train(args)
     elif args.command == "infer":

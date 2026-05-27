@@ -113,6 +113,12 @@ python src/cli.py prepare --input_dir raw-dataset/my_speaker --speaker_name my_s
 python src/cli.py train --experiment_name exp1 --speaker_name my_speaker --epochs 3
 ```
 
+如果是 `CustomVoice` 微调，请在 ASR 之后、训练之前先生成一次 speaker embedding：
+```bash
+python src/cli.py embed --speaker_name my_speaker --init_model Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
+python src/cli.py train --experiment_name exp1 --speaker_name my_speaker --init_model Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice --epochs 3
+```
+
 **步骤 C: 执行推理**
 ```bash
 python src/cli.py infer --checkpoint output/exp1/checkpoint-epoch-2 --speaker my_speaker --text "你好，世界！这是我微调的自定义音色。"

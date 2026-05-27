@@ -5,7 +5,7 @@ import time
 
 import gradio as gr
 
-from utils import resolve_path
+from utils import DEFAULT_TTS_TRAIN_MODEL, resolve_path
 
 
 def checkpoint_sort_key(output_path, exp_name, checkpoint_name):
@@ -237,8 +237,8 @@ def on_new_experiment(name, get_experiments_fn):
         return [
             gr.update(choices=get_experiments_fn(), value=name),
             gr.update(value=""),
-            "0.6B Model",
-            "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+            "0.6B Base",
+            DEFAULT_TTS_TRAIN_MODEL,
             2,
             "1e-7",
             2,
