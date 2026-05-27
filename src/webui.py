@@ -618,6 +618,7 @@ presets = {
     "0.6B Base": { "init_model": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "lr": 1e-7, "epochs": 2, "batch_size": 2, "grad_acc": 4 },
     "1.7B Base": { "init_model": "Qwen/Qwen3-TTS-12Hz-1.7B-Base", "lr": 2e-6, "epochs": 3, "batch_size": 2, "grad_acc": 1 },
     "0.6B CustomVoice": { "init_model": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice", "lr": 1e-7, "epochs": 2, "batch_size": 2, "grad_acc": 4 },
+    "1.7B CustomVoice": { "init_model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", "lr": 2e-6, "epochs": 3, "batch_size": 2, "grad_acc": 1 },
     "Latest Config": {}
 }
 
@@ -998,6 +999,8 @@ with gr.Blocks(title="Qwen3-TTS Easy Finetuning", css=css) as app:
     def auto_preset(model_val):
         if model_val == "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice":
             return "0.6B CustomVoice"
+        if model_val == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice":
+            return "1.7B CustomVoice"
         if "1.7B" in model_val:
             return "1.7B Base"
         return "0.6B Base"
