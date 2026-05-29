@@ -713,6 +713,41 @@ label span, .gr-markdown h3 {
     gap: 16px !important;
 }
 
+/* Step 0 uses fixed action heights so mixed inputs and buttons line up cleanly. */
+.step0-actions {
+    align-items: stretch !important;
+}
+
+.step0-actions button {
+    min-height: 64px !important;
+    height: 64px !important;
+}
+
+.step0-primary-action button {
+    min-height: 42px !important;
+    height: 42px !important;
+}
+
+.step0-actions .gradio-textbox,
+.step0-actions textarea,
+.step0-actions input {
+    min-height: 42px !important;
+}
+
+.step0-field-row > *,
+.step0-model-row > * {
+    min-width: 0 !important;
+}
+
+.tokenize-actions {
+    align-items: stretch !important;
+}
+
+.tokenize-actions button {
+    min-height: 46px !important;
+    height: 46px !important;
+}
+
 /* Premium Button Styling */
 .gr-button-primary {
     background: linear-gradient(135deg, #ff4c00 0%, #ff8c00 100%) !important;
@@ -894,23 +929,21 @@ with gr.Blocks(title="Qwen3-TTS Easy Finetuning", css=css) as app:
             
             with gr.Column(elem_classes="gr-group"):
                 gr.Markdown("### Step 0: Model Selection & Environment")
-                with gr.Row():
-                    with gr.Column(scale=2):
-                        experiment_dropdown = gr.Dropdown(get_experiments(), label="Experiment Name", allow_custom_value=True, info="Select existing, or type below to create")
-                        with gr.Row():
-                            new_exp_name = gr.Textbox(show_label=False, placeholder="New Experiment Name...", scale=2)
-                            exp_new_btn = gr.Button("➕ New", variant="secondary", scale=1)
-                        exp_refresh_btn = gr.Button("🔄 Refresh")
-                    with gr.Column(scale=2):
-                        speaker_dropdown = gr.Dropdown(get_datasets(), label="Select Target Speaker Data", allow_custom_value=True, multiselect=True, info="Select one or more speakers for multi-speaker training")
-                        spk_refresh_btn = gr.Button("🔄 Refresh Speakers")
+                with gr.Row(elem_classes="step0-field-row"):
+                    experiment_dropdown = gr.Dropdown(get_experiments(), label="Experiment Name", allow_custom_value=True, info="Select existing, or type below to create", scale=1)
+                    speaker_dropdown = gr.Dropdown(get_datasets(), label="Select Target Speaker Data", allow_custom_value=True, multiselect=True, info="Select one or more speakers for multi-speaker training", scale=1)
+                with gr.Row(elem_classes="step0-actions"):
+                    new_exp_name = gr.Textbox(show_label=False, placeholder="New Experiment Name...", scale=2)
+                    exp_new_btn = gr.Button("➕ New", variant="secondary", scale=1)
+                    exp_refresh_btn = gr.Button("🔄 Refresh", variant="secondary", scale=1)
+                    spk_refresh_btn = gr.Button("🔄 Refresh Speakers", variant="secondary", scale=2)
                 
-                with gr.Row():
-                    with gr.Column():    
+                with gr.Row(elem_classes="step0-model-row"):
+                    with gr.Column(scale=1):    
                         init_model = gr.Dropdown(SUPPORTED_TTS_TRAIN_MODELS, label="Initial Model", value=DEFAULT_TTS_TRAIN_MODEL, allow_custom_value=True, info="Base or CustomVoice starting weights")
                         model_source = gr.Radio(["HuggingFace", "ModelScope"], label="Source", value="HuggingFace")
-                    with gr.Column():
-                        download_btn = gr.Button("⬇️ Check / Download Model", variant="secondary")
+                    with gr.Column(scale=1):
+                        download_btn = gr.Button("⬇️ Check / Download Model", variant="secondary", elem_classes="step0-primary-action")
                         download_log = gr.Textbox(label="Download Status", lines=3)
 
                 training_gate = gr.HTML(value=render_training_gate("", [], DEFAULT_TTS_TRAIN_MODEL)[0])
@@ -931,8 +964,9 @@ with gr.Blocks(title="Qwen3-TTS Easy Finetuning", css=css) as app:
                         info="Used for encoding audio into tokens",
                         scale=1
                     )
-                step3_btn = gr.Button("▶️ Tokenize Data", variant="primary")
-                embed_btn = gr.Button("🎤 Embed Speakers", variant="secondary", size="sm")
+                with gr.Row(elem_classes="tokenize-actions"):
+                    embed_btn = gr.Button("🎤 Embed Speakers", variant="secondary", scale=1)
+                    step3_btn = gr.Button("▶️ Tokenize Data", variant="primary", scale=1)
                 step3_out = gr.Textbox(label="Tokenization / Embedding Logs", lines=2)
                 
             gr.Markdown("---")
