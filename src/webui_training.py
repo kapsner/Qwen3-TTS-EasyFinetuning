@@ -5,7 +5,14 @@ import time
 
 import gradio as gr
 
-from utils import DEFAULT_TTS_TRAIN_MODEL, ModelDownloadTracker, format_bytes, resolve_path
+from utils import (
+    DEFAULT_TTS_TRAIN_MODEL,
+    ModelDownloadTracker,
+    format_bytes,
+    is_custom_voice_model,
+    missing_speaker_embeddings,
+    resolve_path,
+)
 
 
 def checkpoint_sort_key(output_path, exp_name, checkpoint_name):
@@ -49,6 +56,20 @@ def normalize_speaker_name(speaker_name):
     if isinstance(speaker_name, list):
         return ",".join(s.strip() for s in speaker_name if s and s.strip())
     return speaker_name.strip() if speaker_name else ""
+
+
+def parse_speaker_names(speaker_name):
+    """
+    Normalize Gradio speaker selections into an ordered list.
+
+    Dependencies: Gradio returns multiselect dropdown values as lists, while
+    restored experiment configs may provide comma-separated strings.
+    """
+    if isinstance(speaker_name, list):
+        return [s.strip() for s in speaker_name if s and str(s).strip()]
+    if isinstance(speaker_name, str):
+        return [s.strip() for s in speaker_name.split(",") if s.strip()]
+    return []
 
 
 def normalize_resume_checkpoint(resume_from_checkpoint):
@@ -101,9 +122,60 @@ def build_training_kwargs(
     }
 
 
+class TrainingLogBuffer:
+    """
+    Keep WebUI training logs focused on actionable state instead of every tick.
+
+    Dependencies: handle_training_message feeds structured progress dictionaries
+    from sft_12hz.run_train; raw string messages are preserved as recent events.
+    """
+
+    def __init__(self, limit=12):
+        self.limit = limit
+        self.events = []
+        self.status = "Starting..."
+        self.progress_line = ""
+        self.last_event = ""
+
+    def record_event(self, message):
+        message = str(message).strip()
+        if not message:
+            return self.render()
+        self.status = message
+        if message != self.last_event:
+            timestamp = time.strftime("%H:%M:%S")
+            self.events.append(f"[{timestamp}] {message}")
+            self.events = self.events[-self.limit:]
+            self.last_event = message
+        return self.render()
+
+    def record_progress(self, message):
+        message = str(message).strip()
+        if message:
+            self.progress_line = message
+        return self.render()
+
+    def render(self):
+        lines = [f"Status: {self.status}"]
+        if self.progress_line:
+            lines.append(f"Current: {self.progress_line}")
+        if self.events:
+            lines.extend(["", "Recent events:"])
+            lines.extend(self.events[-self.limit:])
+        return "\n".join(lines)
+
+
 def append_log(log_history, message, limit=30):
+    if hasattr(log_history, "record_event"):
+        return log_history.record_event(message)
     log_history.append(message)
     return "\n".join(log_history[-limit:])
+
+
+def append_progress_log(log_history, message):
+    if hasattr(log_history, "record_progress"):
+        return log_history.record_progress(message)
+    return append_log(log_history, message)
 
 
 def format_training_progress(item, total_epochs):
@@ -140,7 +212,7 @@ def handle_training_message(item, progress, total_epochs, last_status, log_histo
     if msg_type in {"train_progress", "epoch_start"}:
         current_progress, desc_str = format_training_progress(item, total_epochs)
         progress(current_progress, desc=desc_str)
-        return gr.update(), append_log(log_history, desc_str), False
+        return gr.update(), append_progress_log(log_history, desc_str), False
     if msg_type == "done":
         progress(1.0, desc="Done")
         last_status = f"Success: {item.get('msg', 'Completed')}"
@@ -149,7 +221,88 @@ def handle_training_message(item, progress, total_epochs, last_status, log_histo
         progress(0, desc="Error")
         last_status = f"Error: {item.get('msg', 'Unknown Error')}"
         return last_status, append_log(log_history, last_status), True
+    if hasattr(log_history, "render"):
+        return last_status, log_history.render(), False
     return last_status, "\n".join(log_history[-30:]), False
+
+
+def get_training_prerequisites(experiment_name, speaker_name, init_model):
+    """
+    Inspect the current WebUI selections and return workflow gate state.
+
+    Dependencies: tokenization writes logs/{experiment}/tts_train_with_codes.jsonl;
+    embedding writes final-dataset/{speaker}/speaker_emb.safetensors.
+    """
+    experiment = experiment_name.strip() if isinstance(experiment_name, str) else ""
+    speakers = parse_speaker_names(speaker_name)
+    missing = []
+
+    if not experiment:
+        missing.append("Create or select an experiment.")
+    if not speakers:
+        missing.append("Select at least one target speaker.")
+
+    missing_jsonl = []
+    for speaker in speakers:
+        jsonl = resolve_path(os.path.join("final-dataset", speaker, "tts_train.jsonl"))
+        if not os.path.exists(jsonl):
+            missing_jsonl.append(speaker)
+    if missing_jsonl:
+        missing.append("Run Data Preparation Step 1 and Step 2 for: " + ", ".join(missing_jsonl))
+
+    tokenized_path = resolve_path(os.path.join("logs", experiment, "tts_train_with_codes.jsonl")) if experiment else ""
+    tokenized_ready = bool(tokenized_path and os.path.exists(tokenized_path))
+    if experiment and not tokenized_ready:
+        missing.append("Run Tokenize Data for this experiment.")
+
+    missing_embeddings = missing_speaker_embeddings(speakers)
+    embeddings_ready = not missing_embeddings
+    if missing_embeddings:
+        model_note = " CustomVoice training is blocked until this is done." if is_custom_voice_model(init_model) else ""
+        missing.append("Run Embed Speakers for: " + ", ".join(missing_embeddings) + "." + model_note)
+
+    return {
+        "experiment": experiment,
+        "speakers": speakers,
+        "jsonl_ready": not missing_jsonl,
+        "tokenized_ready": tokenized_ready,
+        "embeddings_ready": embeddings_ready,
+        "missing_embeddings": missing_embeddings,
+        "ready": bool(experiment and speakers and tokenized_ready and embeddings_ready and not missing_jsonl),
+        "missing": missing,
+    }
+
+
+def render_training_gate(experiment_name, speaker_name, init_model):
+    """
+    Build a compact readiness panel and button states for the guided workflow.
+
+    Dependencies: Gradio Markdown displays the HTML summary; Button updates are
+    returned to make the workflow intentionally hard to run out of order.
+    """
+    state = get_training_prerequisites(experiment_name, speaker_name, init_model)
+    status = "Ready to train" if state["ready"] else "Blocked"
+    tone = "#16a34a" if state["ready"] else "#f59e0b"
+    speaker_text = ", ".join(state["speakers"]) if state["speakers"] else "none selected"
+    token_text = "ready" if state["tokenized_ready"] else "missing"
+    embed_text = "ready" if state["embeddings_ready"] else "missing"
+    requirements = state["missing"] or ["All prerequisites are satisfied."]
+    requirement_html = "".join(f"<li>{item}</li>" for item in requirements)
+    html = f"""
+<div class="workflow-gate">
+  <div class="gate-title"><span style="color:{tone}">●</span> Training gate: {status}</div>
+  <div class="gate-grid">
+    <span>Experiment: <b>{state["experiment"] or "not selected"}</b></span>
+    <span>Speakers: <b>{speaker_text}</b></span>
+    <span>Tokenized data: <b>{token_text}</b></span>
+    <span>Speaker embeddings: <b>{embed_text}</b></span>
+  </div>
+  <ul>{requirement_html}</ul>
+</div>
+"""
+    can_tokenize = bool(state["experiment"] and state["speakers"] and state["jsonl_ready"])
+    can_embed = bool(state["speakers"] and state["jsonl_ready"])
+    return html, gr.update(interactive=can_tokenize), gr.update(interactive=can_embed), gr.update(interactive=state["ready"])
 
 
 def stream_worker_updates(stream, progress, success_prefix="Success"):

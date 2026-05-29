@@ -34,9 +34,13 @@ from webui_training import (
     build_training_kwargs,
     append_log,
     handle_training_message,
+    get_training_prerequisites,
     load_experiment_config,
     on_new_experiment,
+    parse_speaker_names,
+    render_training_gate,
     stream_worker_updates,
+    TrainingLogBuffer,
     get_deeplink_state,
     run_with_polling,
 )
@@ -261,13 +265,7 @@ def run_step_2(speaker_name, asr_model, asr_source, gpu_id, progress=gr.Progress
 
 # ----------------- Step 3: Tokenization -----------------
 def run_step_3(speaker_name, experiment_name, gpu_id, model_source, progress=gr.Progress()):
-    if isinstance(speaker_name, list):
-        speaker_names = [s.strip() for s in speaker_name if s.strip()]
-    elif isinstance(speaker_name, str):
-        speaker_names = [s.strip() for s in speaker_name.split(",") if s.strip()]
-    else:
-        speaker_names = []
-
+    speaker_names = parse_speaker_names(speaker_name)
     experiment_name = experiment_name.strip() if experiment_name else ""
     if not speaker_names or not experiment_name:
         yield "Please specify Speaker Name and Experiment Name."
@@ -318,11 +316,8 @@ def run_step_3(speaker_name, experiment_name, gpu_id, model_source, progress=gr.
 
 def run_embed_speakers(speaker_name, gpu_id, model_name, model_source, progress=gr.Progress()):
     """Pre-compute speaker embeddings from reference audio."""
-    if isinstance(speaker_name, list):
-        speakers = [s.strip() for s in speaker_name if s.strip()]
-    elif isinstance(speaker_name, str):
-        speakers = [s.strip() for s in speaker_name.split(",") if s.strip()]
-    else:
+    speakers = parse_speaker_names(speaker_name)
+    if not speakers:
         yield "Please select speakers."
         return
 
@@ -374,7 +369,17 @@ def run_embed_speakers(speaker_name, gpu_id, model_name, model_source, progress=
             msgs.append(f"{spk}: JSONL is empty, skip")
             continue
         ref = entries[0].get("ref_audio")
-        if not ref or not os.path.exists(ref):
+        # JSONL entries may store project-relative or audio-dir-relative paths,
+        # so resolve them before deciding the embed step failed.
+        from embed_speaker import resolve_existing_audio_path
+        ref = resolve_existing_audio_path(
+            ref,
+            fallback_dirs=[
+                resolve_path(f"final-dataset/{spk}/audio_24k"),
+                resolve_path(f"final-dataset/{spk}"),
+            ],
+        )
+        if not ref:
             msgs.append(f"{spk}: ref_audio not found in JSONL, skip")
             continue
 
@@ -472,6 +477,10 @@ def start_training(
         yield f"Error: JSONL file {train_jsonl} not found. Please run tokenization (Step 1 -> 2 -> 3) first.", ""
         return
     speaker_names = [s.strip() for s in speaker_name_str.split(",") if s.strip()]
+    gate_state = get_training_prerequisites(experiment_name, speaker_names, init_model)
+    if not gate_state["ready"]:
+        yield "Error: Training prerequisites are not complete. Check the Training gate panel.", "\n".join(gate_state["missing"])
+        return
     missing_embeddings = missing_speaker_embeddings(speaker_names)
     if missing_embeddings:
         guidance = (
@@ -510,7 +519,7 @@ def start_training(
     os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id.replace("cuda:", "") if gpu_id != "cpu" else ""
     check_tb()
     print(f"Starting in-process training on {gpu_id}...")
-    log_history = []
+    log_history = TrainingLogBuffer()
     last_status = "Starting..."
     final_resume = normalize_resume_checkpoint(resume_from_checkpoint)
     training_kwargs = build_training_kwargs(
@@ -551,7 +560,7 @@ def start_training(
                 last_status = item
                 yield last_status, append_log(log_history, item)
     except Exception as e:
-        yield f"Error: Unhandled exception {str(e)}", "\n".join(log_history[-30:])
+        yield f"Error: Unhandled exception {str(e)}", log_history.render()
 
 def stop_training():
     global_training_stop_event
@@ -793,6 +802,32 @@ label span, .gr-markdown h3 {
     border-bottom: 2px solid #ff4c00 !important;
     color: #ff4c00 !important;
 }
+
+.workflow-gate {
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 8px;
+    padding: 14px 16px;
+    background: rgba(255, 255, 255, 0.035);
+    margin: 8px 0 18px 0;
+}
+
+.workflow-gate .gate-title {
+    font-weight: 700;
+    margin-bottom: 10px;
+}
+
+.workflow-gate .gate-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px 18px;
+    margin-bottom: 8px;
+    font-size: 0.92rem;
+}
+
+.workflow-gate ul {
+    margin: 8px 0 0 18px;
+    padding: 0;
+}
 """
 
 with gr.Blocks(title="Qwen3-TTS Easy Finetuning", css=css) as app:
@@ -914,6 +949,9 @@ with gr.Blocks(title="Qwen3-TTS Easy Finetuning", css=css) as app:
                     with gr.Column():
                         download_btn = gr.Button("⬇️ Check / Download Model", variant="secondary")
                         download_log = gr.Textbox(label="Download Status", lines=3)
+
+                training_gate = gr.HTML(value=render_training_gate("", [], DEFAULT_TTS_TRAIN_MODEL)[0])
+                gate_refresh_btn = gr.Button("Check Training Readiness", variant="secondary")
                     
             gr.Markdown("---")
                     
@@ -1009,6 +1047,8 @@ with gr.Blocks(title="Qwen3-TTS Easy Finetuning", css=css) as app:
     def refresh_exps():
         return gr.update(choices=get_experiments())
     route_hint = gr.HTML("<div style='opacity:0.75;font-size:0.9em;margin-top:-8px;margin-bottom:8px;'>Direct routes: <code>#data?exp=your_exp</code> / <code>#training?exp=your_exp</code> / <code>#inference?ckpt=exp/checkpoint-*</code></div>")
+    gate_inputs = [experiment_dropdown, speaker_dropdown, init_model]
+    gate_outputs = [training_gate]
     exp_refresh_btn.click(fn=refresh_exps, outputs=[experiment_dropdown])
     
     # New Experiment Handler
@@ -1022,6 +1062,7 @@ with gr.Blocks(title="Qwen3-TTS Easy Finetuning", css=css) as app:
         inputs=[experiment_dropdown], 
         outputs=[preset_dropdown, init_model, t_batch, t_lr, t_epochs, t_grad, speaker_dropdown, t_speedup, t_resume, t_save_strategy, t_save_steps, t_keep_ckpt, t_use_accelerator, train_status, t_resume]
     )
+    gate_refresh_btn.click(fn=lambda exp, spk, model: render_training_gate(exp, spk, model)[0], inputs=gate_inputs, outputs=gate_outputs)
     
     # Update training click handler
     train_btn.click(fn=start_training, inputs=train_btn_inputs, outputs=[train_status, log_box])
@@ -1059,16 +1100,6 @@ with gr.Blocks(title="Qwen3-TTS Easy Finetuning", css=css) as app:
     # Utilities
     download_btn.click(fn=check_or_download_model, inputs=[init_model, model_source], outputs=[download_log])
     preset_dropdown.change(fn=apply_preset, inputs=[preset_dropdown, experiment_dropdown], outputs=[init_model, t_lr, t_epochs, t_batch, t_grad])
-    # Also auto change preset when init model changes if it matches
-    def auto_preset(model_val):
-        if model_val == "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice":
-            return "0.6B CustomVoice"
-        if model_val == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice":
-            return "1.7B CustomVoice"
-        if "1.7B" in model_val:
-            return "1.7B Base"
-        return "0.6B Base"
-    init_model.change(fn=auto_preset, inputs=[init_model], outputs=[preset_dropdown])
     
     # Training
     stop_btn.click(fn=stop_training, outputs=[train_status])
