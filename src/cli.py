@@ -19,10 +19,12 @@ import argparse
 from utils import (
     DEFAULT_TTS_TRAIN_MODEL,
     SUPPORTED_TTS_TRAIN_MODELS,
+    configure_visible_cuda_device,
     get_model_path,
     get_project_root,
     is_custom_voice_model,
     missing_speaker_embeddings,
+    normalize_resume_checkpoint_arg,
     resolve_embed_base_model,
     resolve_path,
     resolve_speaker_choice,
@@ -114,6 +116,7 @@ def cmd_split(args):
 def cmd_asr(args):
     """Step 2: ASR Transcription & Cleaning."""
     print_step("Step 2: ASR Transcription & Cleaning")
+    configure_visible_cuda_device(args.gpu)
     from step2_asr_clean import run_step_2
     
     speaker_dir = resolve_path(os.path.join("final-dataset", args.speaker_name))
@@ -126,13 +129,13 @@ def cmd_asr(args):
     ref_24k = os.path.join(audio_24k_dir, "ref_24k.wav")
     ref_path = ref_24k if os.path.exists(ref_24k) else ""
     
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu.replace("cuda:", "") if args.gpu != "cpu" else ""
     consume_generator(run_step_2(audio_24k_dir, ref_path, output_jsonl, resolved_asr, batch_size=args.batch_size))
 
 
 def cmd_tokenize(args):
     """Step 3: Data Tokenization (supports multi-speaker merge)."""
     print_step("Step 3: Data Tokenization")
+    device = configure_visible_cuda_device(args.gpu)
     from prepare_data import run_prepare
     
     # Parse comma-separated speaker names
@@ -172,8 +175,6 @@ def cmd_tokenize(args):
     
     use_hf = args.model_source == "HuggingFace"
     resolved_tokenizer = get_model_path("Qwen/Qwen3-TTS-Tokenizer-12Hz", use_hf=use_hf)
-    device = "cuda:0" if args.gpu != "cpu" else "cpu"
-    
     consume_generator(run_prepare(device, resolved_tokenizer, input_jsonl, output_codes_jsonl))
 
 
@@ -227,6 +228,7 @@ def cmd_train(args):
     print(f"  Save Strategy: {args.save_strategy}")
     print(f"  Save Steps   : {args.save_steps}")
     print(f"  Keep Ckpt    : {args.keep_last_n_checkpoints}")
+    print(f"  Resume       : {args.resume_from_checkpoint}")
     print(f"  Accelerator  : {args.use_accelerator}")
 
     train_jsonl = resolve_path(os.path.join("logs", args.experiment_name, "tts_train_with_codes.jsonl"))
@@ -265,6 +267,7 @@ def cmd_train(args):
         "save_steps": args.save_steps,
         "keep_last_n_checkpoints": args.keep_last_n_checkpoints,
         "use_accelerator": args.use_accelerator,
+        "resume_from_checkpoint": args.resume_from_checkpoint,
     }
     with open(config_path, "w") as f:
         json.dump(config_data, f, indent=4)
@@ -282,7 +285,8 @@ def cmd_train(args):
 
     # Run training
     print_step(f"Training started on {args.gpu}...")
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu.replace("cuda:", "") if args.gpu != "cpu" else ""
+    configure_visible_cuda_device(args.gpu)
+    resume_from_checkpoint = normalize_resume_checkpoint_arg(args.resume_from_checkpoint)
 
     from sft_12hz import run_train
 
@@ -297,7 +301,7 @@ def cmd_train(args):
             lr=args.lr,
             num_epochs=args.epochs,
             gradient_accumulation_steps=args.grad_acc,
-            resume_from_checkpoint="latest",
+            resume_from_checkpoint=resume_from_checkpoint,
             save_strategy=args.save_strategy,
             save_steps=args.save_steps,
             keep_last_n_checkpoints=args.keep_last_n_checkpoints,
@@ -500,6 +504,7 @@ Examples:
     p_train.add_argument("--save_strategy", type=str, choices=["step", "epoch", "both"], default="both", help="Checkpoint save strategy")
     p_train.add_argument("--save_steps", type=int, default=200, help="Save step checkpoint every N global steps")
     p_train.add_argument("--keep_last_n_checkpoints", type=int, default=3, help="Keep last N checkpoints per save type")
+    p_train.add_argument("--resume_from_checkpoint", type=str, default="latest", help="Resume source: latest, none, or a checkpoint path")
     p_train.add_argument("--use_accelerator", action="store_true", default=False, help="Use accelerate when available")
 
     # ── infer ──

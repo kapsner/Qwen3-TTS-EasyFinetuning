@@ -28,6 +28,35 @@ def resolve_path(path):
     return os.path.abspath(os.path.join(get_project_root(), path))
 
 
+def configure_visible_cuda_device(gpu):
+    '''Limit CUDA visibility for single-device CLI jobs and return the remapped runtime device.'''
+    gpu = str(gpu or "cpu").strip()
+    if gpu == "cpu":
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        return "cpu"
+    if gpu == "cuda":
+        return "cuda:0"
+    if gpu.startswith("cuda:"):
+        os.environ["CUDA_VISIBLE_DEVICES"] = gpu.split(":", 1)[1]
+        return "cuda:0"
+    os.environ["CUDA_VISIBLE_DEVICES"] = gpu
+    return "cuda:0"
+
+
+def normalize_resume_checkpoint_arg(value):
+    '''Normalize CLI resume values into latest, None, or an absolute checkpoint path.'''
+    if value is None:
+        return "latest"
+    value = str(value).strip()
+    if not value:
+        return "latest"
+    if value.lower() in {"none", "false", "no", "off", "0"}:
+        return None
+    if value.lower() == "latest":
+        return "latest"
+    return resolve_path(value)
+
+
 def get_model_local_dir(model_id):
     root = get_project_root()
     return os.path.join(root, 'models', model_id)
