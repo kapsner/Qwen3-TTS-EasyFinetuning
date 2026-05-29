@@ -7,7 +7,7 @@ import gc
 from tqdm import tqdm
 from qwen_asr import Qwen3ASRModel
 
-from utils import get_project_root
+from utils import get_model_path, get_project_root
 
 def log_progress(progress, desc):
     print(json.dumps({"type": "progress", "progress": progress, "desc": desc}), flush=True)
@@ -20,14 +20,18 @@ def log_error(msg):
 
 def run_step_2(input_dir, ref_audio, output_jsonl, model_id="Qwen/Qwen3-ASR-1.7B", batch_size=16):
     try:
-        yield {"type": "progress", "progress": 0.01, "desc": f"Loading ASR Model: {model_id}..."}
+        yield {"type": "progress", "progress": 0.01, "desc": f"Resolving ASR Model: {model_id}..."}
+        # Keep this worker safe when it is called directly: hub ids are first
+        # materialized into the shared project model store before loading.
+        resolved_model_id = get_model_path(model_id, use_hf=False)
+        yield {"type": "progress", "progress": 0.05, "desc": f"Loading ASR Model: {resolved_model_id}..."}
         
         kwargs = {"dtype": torch.bfloat16, "device_map": "auto"}
         if torch.cuda.is_available():
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
             
-        asr_model = Qwen3ASRModel.from_pretrained(model_id, **kwargs)
+        asr_model = Qwen3ASRModel.from_pretrained(resolved_model_id, **kwargs)
         
         wav_files = sorted(glob.glob(os.path.join(input_dir, "*.wav")))
         wav_files = [f for f in wav_files if os.path.basename(f) not in ["ref.wav", "ref_24k.wav"]]
@@ -79,4 +83,3 @@ def run_step_2(input_dir, ref_audio, output_jsonl, model_id="Qwen/Qwen3-ASR-1.7B
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-

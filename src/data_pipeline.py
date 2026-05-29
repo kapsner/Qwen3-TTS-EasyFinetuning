@@ -6,6 +6,7 @@ import re
 from pydub import AudioSegment, silence
 from tqdm import tqdm
 from qwen_asr import Qwen3ASRModel
+from utils import get_model_path
 
 EDGE_SILENCE_MS = 200
 FADE_MS = 40
@@ -138,13 +139,16 @@ def run_pipeline(input_dir, ref_audio, output_dir, model_id="Qwen/Qwen3-ASR-1.7B
     if ref_audio:
         resample_audio(ref_audio, ref_24k_path)
     
-    if progress: progress(0.1, desc=f"Loading Model: {model_id} (Downloading might take a while...)")
-    print(f"Loading ASR Model: {model_id}")
+    if progress: progress(0.1, desc=f"Resolving Model: {model_id}...")
+    # Route remote ids through the shared repository so from_pretrained always
+    # reads a project-owned local directory instead of a hub-specific cache.
+    resolved_model_id = get_model_path(model_id, use_hf=False)
+    print(f"Loading ASR Model: {resolved_model_id}")
     kwargs = {"dtype": torch.bfloat16, "device_map": "auto"}
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-    asr_model = Qwen3ASRModel.from_pretrained(model_id, **kwargs)
+    asr_model = Qwen3ASRModel.from_pretrained(resolved_model_id, **kwargs)
     
     wav_files = sorted(glob.glob(os.path.join(input_dir, "*.wav")))
     all_segments = []

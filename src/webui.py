@@ -15,6 +15,7 @@ import gc
 import sys
 from utils import (
     DEFAULT_TTS_TRAIN_MODEL,
+    ModelDownloadTracker,
     SUPPORTED_TTS_TRAIN_MODELS,
     get_model_path,
     get_model_local_dir,
@@ -127,6 +128,38 @@ import inspect
 
 global_training_stop_event = None
 
+
+def resolve_model_with_progress(
+    model_id,
+    model_source,
+    progress,
+    progress_start=0.02,
+    progress_end=0.20,
+    desc_prefix=None,
+):
+    """
+    Resolve a model for WebUI flows while reporting shared download progress.
+
+    Dependencies: get_model_path performs source-specific downloading and local
+    materialization; run_with_polling keeps Gradio responsive while it runs.
+    """
+    use_hf = model_source == "HuggingFace"
+    tracker = ModelDownloadTracker()
+    label = desc_prefix or f"Preparing model {model_id}"
+
+    def resolver():
+        return get_model_path(model_id, use_hf=use_hf, progress_tracker=tracker)
+
+    resolver.progress_tracker = tracker
+    resolver.target_dir = get_model_local_dir(model_id)
+    return run_with_polling(
+        resolver,
+        progress,
+        progress_start=progress_start,
+        progress_end=progress_end,
+        desc_prefix=label,
+    )
+
 def _run_worker(func, q, stop_event, env_vars, args, kwargs):
     try:
         import os
@@ -214,8 +247,14 @@ def run_step_2(speaker_name, asr_model, asr_source, gpu_id, progress=gr.Progress
         yield f"Error: Directory {input_dir} not found. Please run Step 1 first."
         return
 
-    use_hf = asr_source == "HuggingFace"
-    resolved_model_id = get_model_path(asr_model, use_hf=use_hf)
+    resolved_model_id = resolve_model_with_progress(
+        asr_model,
+        asr_source,
+        progress,
+        progress_start=0.02,
+        progress_end=0.12,
+        desc_prefix=f"Preparing ASR model {asr_model}",
+    )
     os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id.replace("cuda:", "") if gpu_id != "cpu" else ""
     stream = stream_isolated(internal_run_step_2, input_dir, ref_path, output_jsonl, resolved_model_id, batch_size=16)
     yield from stream_worker_updates(stream, progress)
@@ -264,8 +303,14 @@ def run_step_3(speaker_name, experiment_name, gpu_id, model_source, progress=gr.
             yield f"Error: File {input_jsonl} not found. Please run Data Prep Step 1 & 2 first."
             return
 
-    use_hf = model_source == "HuggingFace"
-    resolved_tokenizer = get_model_path("Qwen/Qwen3-TTS-Tokenizer-12Hz", use_hf=use_hf)
+    resolved_tokenizer = resolve_model_with_progress(
+        "Qwen/Qwen3-TTS-Tokenizer-12Hz",
+        model_source,
+        progress,
+        progress_start=0.02,
+        progress_end=0.12,
+        desc_prefix="Preparing tokenizer Qwen/Qwen3-TTS-Tokenizer-12Hz",
+    )
     device = "cuda:0" if gpu_id != "cpu" else "cpu"
     os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id.replace("cuda:", "") if gpu_id != "cpu" else ""
     stream = stream_isolated(internal_run_prepare, device, resolved_tokenizer, input_jsonl, output_jsonl)
@@ -286,8 +331,14 @@ def run_embed_speakers(speaker_name, gpu_id, model_name, model_source, progress=
         return
 
     base_model = resolve_embed_base_model(model_name)
-    use_hf = model_source == "HuggingFace"
-    resolved_base_model = get_model_path(base_model, use_hf=use_hf)
+    resolved_base_model = resolve_model_with_progress(
+        base_model,
+        model_source,
+        progress,
+        progress_start=0.02,
+        progress_end=0.10,
+        desc_prefix=f"Preparing speaker encoder {base_model}",
+    )
     device = "cuda:0"
     progress(0.1, desc=f"Loading speaker_encoder from {base_model}...")
     import torch, librosa, json
@@ -350,18 +401,25 @@ def run_embed_speakers(speaker_name, gpu_id, model_name, model_source, progress=
 
 # ----------------- Download Model -----------------
 def check_or_download_model(init_model, model_source, progress=gr.Progress()):
-    use_hf = model_source == "HuggingFace"
     tokenizer_model_id = "Qwen/Qwen3-TTS-Tokenizer-12Hz"
     try:
         progress(0.02, desc="Preparing downloads...")
-        def download_base_model():
-            return get_model_path(init_model, use_hf=use_hf)
-        download_base_model.target_dir = get_model_local_dir(init_model)
-        resolved_init_model = run_with_polling(download_base_model, progress, progress_start=0.05, progress_end=0.55, desc_prefix=f"Downloading base model {init_model}")
-        def download_tokenizer_model():
-            return get_model_path(tokenizer_model_id, use_hf=use_hf)
-        download_tokenizer_model.target_dir = get_model_local_dir(tokenizer_model_id)
-        resolved_tokenizer = run_with_polling(download_tokenizer_model, progress, progress_start=0.60, progress_end=0.98, desc_prefix=f"Downloading tokenizer {tokenizer_model_id}")
+        resolved_init_model = resolve_model_with_progress(
+            init_model,
+            model_source,
+            progress,
+            progress_start=0.05,
+            progress_end=0.55,
+            desc_prefix=f"Downloading base model {init_model}",
+        )
+        resolved_tokenizer = resolve_model_with_progress(
+            tokenizer_model_id,
+            model_source,
+            progress,
+            progress_start=0.60,
+            progress_end=0.98,
+            desc_prefix=f"Downloading tokenizer {tokenizer_model_id}",
+        )
         progress(1.0, desc="All required models are ready")
         return f"Base model ready at: {resolved_init_model}\nTokenizer ready at: {resolved_tokenizer}"
     except Exception as e:
@@ -441,8 +499,14 @@ def start_training(
         "use_accelerator": use_accelerator,
     }
     save_training_config(output_dir, config_data)
-    use_hf = model_source == "HuggingFace"
-    resolved_init_model = get_model_path(init_model, use_hf=use_hf)
+    resolved_init_model = resolve_model_with_progress(
+        init_model,
+        model_source,
+        progress,
+        progress_start=0.01,
+        progress_end=0.08,
+        desc_prefix=f"Preparing training model {init_model}",
+    )
     os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id.replace("cuda:", "") if gpu_id != "cpu" else ""
     check_tb()
     print(f"Starting in-process training on {gpu_id}...")
@@ -849,7 +913,7 @@ with gr.Blocks(title="Qwen3-TTS Easy Finetuning", css=css) as app:
                         model_source = gr.Radio(["HuggingFace", "ModelScope"], label="Source", value="HuggingFace")
                     with gr.Column():
                         download_btn = gr.Button("⬇️ Check / Download Model", variant="secondary")
-                        download_log = gr.Textbox(label="Download Status", lines=1)
+                        download_log = gr.Textbox(label="Download Status", lines=3)
                     
             gr.Markdown("---")
                     

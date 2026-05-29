@@ -3,6 +3,7 @@ import time
 import torch
 import soundfile as sf
 from qwen_tts import Qwen3TTSModel
+from utils import get_model_path
 
 @torch.no_grad()
 def run():
@@ -14,11 +15,12 @@ def run():
     parser.add_argument("--device", type=str, default="cuda:0", help="GPU device")
     args = parser.parse_args()
 
-    print(f"Loading model from {args.model_path} on {args.device}...")
+    resolved_model_path = get_model_path(args.model_path, use_hf=False)
+    print(f"Loading model from {resolved_model_path} on {args.device}...")
     start_time = time.time()
     
     tts = Qwen3TTSModel.from_pretrained(
-        args.model_path,
+        resolved_model_path,
         device_map=args.device,
         torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
@@ -36,4 +38,3 @@ def run():
 
     sf.write(args.output, wavs[0], sr)
     print(f"Done! Result saved to {args.output}")
-

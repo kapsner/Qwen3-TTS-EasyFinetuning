@@ -5,7 +5,7 @@ import time
 
 import gradio as gr
 
-from utils import DEFAULT_TTS_TRAIN_MODEL, resolve_path
+from utils import DEFAULT_TTS_TRAIN_MODEL, ModelDownloadTracker, format_bytes, resolve_path
 
 
 def checkpoint_sort_key(output_path, exp_name, checkpoint_name):
@@ -258,6 +258,13 @@ def on_new_experiment(name, get_experiments_fn):
 
 
 def run_with_polling(fn, progress, progress_start=0.02, progress_end=0.95, desc_prefix="Downloading"):
+    """
+    Run a blocking job in a worker thread and keep Gradio progress responsive.
+
+    Dependencies: a callable may expose `progress_tracker` from model_repository
+    for model downloads. Older callers can still expose `target_dir`, which is
+    scanned as a fallback to show size and speed.
+    """
     result = {"value": None, "error": None}
 
     def worker():
@@ -271,6 +278,7 @@ def run_with_polling(fn, progress, progress_start=0.02, progress_end=0.95, desc_
     last_time = time.time()
     last_size = 0
     target_dir = None
+    tracker = getattr(fn, "progress_tracker", None)
     try:
         maybe_path = getattr(fn, "target_dir", None)
         if maybe_path:
@@ -280,7 +288,25 @@ def run_with_polling(fn, progress, progress_start=0.02, progress_end=0.95, desc_
 
     while thread.is_alive():
         current_time = time.time()
-        if target_dir and os.path.exists(target_dir):
+        if isinstance(tracker, ModelDownloadTracker):
+            snapshot = tracker.snapshot()
+            if snapshot.fraction is not None:
+                progress_value = progress_start + (progress_end - progress_start) * min(snapshot.fraction, 0.995)
+            else:
+                # Unknown totals are common with ModelScope; advance slowly while
+                # still reporting real downloaded bytes and instantaneous speed.
+                elapsed_factor = min(snapshot.elapsed_seconds / 300.0, 0.90)
+                progress_value = progress_start + (progress_end - progress_start) * elapsed_factor
+            total_text = f" / {format_bytes(snapshot.total_bytes)}" if snapshot.total_bytes else ""
+            speed_text = f"{format_bytes(snapshot.speed_bps)}/s"
+            progress(
+                progress_value,
+                desc=(
+                    f"{desc_prefix} | {snapshot.stage} | "
+                    f"{format_bytes(snapshot.downloaded_bytes)}{total_text} | {speed_text}"
+                ),
+            )
+        elif target_dir and os.path.exists(target_dir):
             total_size = 0
             for root, _, files in os.walk(target_dir):
                 for name in files:
