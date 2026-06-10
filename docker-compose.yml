@@ -13,8 +13,8 @@ services:
     # Shared memory size for DataLoader (crucial for both Linux and Windows/WSL2 training)
     shm_size: '2gb'
     ports:
-      - "7860:7860"
-      - "6006:6006"
+      - "127.0.0.1:7860:7860"
+      - "127.0.0.1:6006:6006"
     volumes:
       # Use relative paths for better cross-platform support
       - ./final-dataset:/workspace/final-dataset
