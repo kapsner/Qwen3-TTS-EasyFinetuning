@@ -1,4 +1,4 @@
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+FROM pytorch/pytorch:2.12.0-cuda13.0-cudnn9-devel
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV USE_HF=1
@@ -16,11 +16,13 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /workspace
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir qwen-tts==0.1.1 qwen-asr==0.0.6 --no-deps
+RUN pip install --no-cache-dir --break-system-packages uv
+RUN uv pip install --system --break-system-packages --no-cache-dir -r requirements.txt
+RUN uv pip install --system --break-system-packages --no-cache-dir qwen-tts==0.1.1 qwen-asr==0.0.6 --no-deps
 
 # Install Flash Attention
-RUN pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl || pip install flash-attn==2.8.3 --no-build-isolation
+RUN uv pip install --system --break-system-packages --no-cache-dir --prerelease=allow "flash-attn-4[cu13]"
+# RUN uv pip install --system --break-system-packages https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl || uv pip install --system --break-system-packages flash-attn==2.8.3 --no-build-isolation
 
 
 COPY src/ /workspace/src/
@@ -31,4 +33,4 @@ EXPOSE 7860 6006
 
 ENV PYTHONPATH="/workspace/src"
 
-CMD ["python", "src/webui.py"]
+CMD ["uv", "run", "src/webui.py"]
